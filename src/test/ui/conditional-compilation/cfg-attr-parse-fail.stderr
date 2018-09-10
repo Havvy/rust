@@ -1,0 +1,14 @@
+error: expected `,`, found `)`
+  --> $DIR/cfg-attr-parse-fail.rs:3:17
+   |
+LL | #[cfg_attr(all())] //~ error: expected `,`, found `)`
+   |                 ^ expected `,`
+
+error: expected identifier, found `)`
+  --> $DIR/cfg-attr-parse-fail.rs:6:12
+   |
+LL | #[cfg_attr()] //~ error: expected identifier, found `)`
+   |            ^ expected identifier
+
+error: aborting due to 2 previous errors
+
