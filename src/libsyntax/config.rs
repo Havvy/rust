@@ -12,10 +12,12 @@ use attr::HasAttrs;
 use feature_gate::{feature_err, EXPLAIN_STMT_ATTR_SYNTAX, Features, get_features, GateIssue};
 use {fold, attr};
 use ast;
+use ast::NodeId;
 use source_map::Spanned;
 use edition::Edition;
 use parse::{token, ParseSess};
 use OneVector;
+use early_buffered_lints::BufferedEarlyLintId;
 
 use ptr::P;
 
@@ -37,7 +39,7 @@ pub fn features(mut krate: ast::Crate, sess: &ParseSess, edition: Edition)
 
         let unconfigured_attrs = krate.attrs.clone();
         let err_count = sess.span_diagnostic.err_count();
-        if let Some(attrs) = strip_unconfigured.configure(krate.attrs) {
+        if let Some(attrs) = strip_unconfigured.configure(krate.attrs, ast::CRATE_NODE_ID) {
             krate.attrs = attrs;
         } else { // the entire crate is unconfigured
             krate.attrs = Vec::new();
@@ -50,7 +52,7 @@ pub fn features(mut krate: ast::Crate, sess: &ParseSess, edition: Edition)
         // Avoid reconfiguring malformed `cfg_attr`s
         if err_count == sess.span_diagnostic.err_count() {
             strip_unconfigured.features = Some(&features);
-            strip_unconfigured.configure(unconfigured_attrs);
+            strip_unconfigured.configure(unconfigured_attrs, ast::CRATE_NODE_ID);
         }
     }
 
@@ -59,7 +61,7 @@ pub fn features(mut krate: ast::Crate, sess: &ParseSess, edition: Edition)
 
 macro_rules! configure {
     ($this:ident, $node:ident) => {
-        match $this.configure($node) {
+        match $this.configure($node, $node.id) {
             Some(node) => node,
             None => return Default::default(),
         }
@@ -67,8 +69,15 @@ macro_rules! configure {
 }
 
 impl<'a> StripUnconfigured<'a> {
-    pub fn configure<T: HasAttrs>(&mut self, node: T) -> Option<T> {
-        let node = self.process_cfg_attrs(node);
+    /// Process the `cfg` and `cfg_attr` attributes. For `cfg`, remove the
+    /// thing if the configuration predicate is false. For `cfg_attr`, add
+    /// the list of attributes if the configuration predicate is true. In
+    /// all cases, remove the handled attribute from the thing the
+    /// attribute is on.
+    ///
+    /// The id is of the thing the attribute is on.
+    pub fn configure<T: HasAttrs>(&mut self, node: T, id: NodeId) -> Option<T> {
+        let node = self.process_cfg_attrs(node, id);
         if self.in_cfg(node.attrs()) { Some(node) } else { None }
     }
 
@@ -78,9 +87,11 @@ impl<'a> StripUnconfigured<'a> {
     /// Gives compiler warnigns if any `cfg_attr` does not contain any
     /// attributes and is in the original source code. Gives compiler errors if
     /// the syntax of any `cfg_attr` is incorrect.
-    pub fn process_cfg_attrs<T: HasAttrs>(&mut self, node: T) -> T {
+    ///
+    /// The id is of the thing the attribute is on.
+    pub fn process_cfg_attrs<T: HasAttrs>(&mut self, node: T, id: NodeId) -> T {
         node.map_attrs(|attrs| {
-            attrs.into_iter().flat_map(|attr| self.process_cfg_attr(attr)).collect()
+            attrs.into_iter().flat_map(|attr| self.process_cfg_attr(attr, id)).collect()
         })
     }
 
@@ -91,10 +102,15 @@ impl<'a> StripUnconfigured<'a> {
     /// Gives a compiler warning when the `cfg_attr` contains no attribtes and
     /// is in the original source file. Gives a compiler error if the syntax of
     /// the attribute is incorrect
-    fn process_cfg_attr(&mut self, attr: ast::Attribute) -> Vec<ast::Attribute> {
+    ///
+    /// The id is of the thing the attribute is on.
+    fn process_cfg_attr(&mut self, attr: ast::Attribute, id: NodeId) -> Vec<ast::Attribute> {
         if !attr.check_name("cfg_attr") {
             return vec![attr];
         }
+
+        // Used for the Unused Attributes lint.
+        let attr_span = attr.span();
 
         let (cfg_predicate, expanded_attrs) = match attr.parse(self.sess, |parser| {
             parser.expect(&token::OpenDelim(token::Paren))?;
@@ -102,25 +118,24 @@ impl<'a> StripUnconfigured<'a> {
             let cfg_predicate = parser.parse_meta_item()?;
             parser.expect(&token::Comma)?;
 
-            // Presumably, the majority of the time there will only be one attr.
+            // Presumably, the majority of the time there will only be one attribute.
             let mut expanded_attrs = Vec::with_capacity(1);
-
-            // We keep track of whether the cfg_attr contains an inner attribute
-            // so that we can warn if it's empty.
-            let mut cfg_attr_has_at_least_one_attr = false;
 
             while parser.token != token::CloseDelim(token::Paren) {
                 let lo = parser.span.lo();
                 let (path, tokens) = parser.parse_meta_item_unrestricted()?;
                 expanded_attrs.push((path, tokens, parser.prev_span.with_lo(lo)));
-                cfg_attr_has_at_least_one_attr = true;
 
                 parser.expect_one_of(&[token::Comma], &[token::CloseDelim(token::Paren)])?;
             }
 
-            if !cfg_attr_has_at_least_one_attr {
-                // FIXME(Havvy, Don't merge with this here)
-                // Span an unused_cfg_attr lint.
+            if expanded_attrs.is_empty() {
+                parser.sess.buffer_lint(
+                    BufferedEarlyLintId::UnusedAttributes,
+                    attr_span,
+                    id,
+                    "unused attribute",
+                );
             }
 
             parser.expect(&token::CloseDelim(token::Paren))?;
@@ -145,7 +160,7 @@ impl<'a> StripUnconfigured<'a> {
                 tokens,
                 is_sugared_doc: false,
                 span,
-            }))
+            }, id))
             .collect()
         } else {
             Vec::new()
@@ -225,18 +240,19 @@ impl<'a> StripUnconfigured<'a> {
     pub fn configure_foreign_mod(&mut self, foreign_mod: ast::ForeignMod) -> ast::ForeignMod {
         ast::ForeignMod {
             abi: foreign_mod.abi,
-            items: foreign_mod.items.into_iter().filter_map(|item| self.configure(item)).collect(),
+            items: foreign_mod.items.into_iter().filter_map(|item| self.configure(item, item.id))
+                .collect(),
         }
     }
 
     fn configure_variant_data(&mut self, vdata: ast::VariantData) -> ast::VariantData {
         match vdata {
             ast::VariantData::Struct(fields, id) => {
-                let fields = fields.into_iter().filter_map(|field| self.configure(field));
+                let fields = fields.into_iter().filter_map(|field| self.configure(field, id));
                 ast::VariantData::Struct(fields.collect(), id)
             }
             ast::VariantData::Tuple(fields, id) => {
-                let fields = fields.into_iter().filter_map(|field| self.configure(field));
+                let fields = fields.into_iter().filter_map(|field| self.configure(field, id));
                 ast::VariantData::Tuple(fields.collect(), id)
             }
             ast::VariantData::Unit(id) => ast::VariantData::Unit(id)
@@ -253,7 +269,7 @@ impl<'a> StripUnconfigured<'a> {
             }
             ast::ItemKind::Enum(def, generics) => {
                 let variants = def.variants.into_iter().filter_map(|v| {
-                    self.configure(v).map(|v| {
+                    self.configure(v, v.node.data.id()).map(|v| {
                         Spanned {
                             node: ast::Variant_ {
                                 ident: v.node.ident,
@@ -276,13 +292,13 @@ impl<'a> StripUnconfigured<'a> {
     pub fn configure_expr_kind(&mut self, expr_kind: ast::ExprKind) -> ast::ExprKind {
         match expr_kind {
             ast::ExprKind::Match(m, arms) => {
-                let arms = arms.into_iter().filter_map(|a| self.configure(a)).collect();
+                let arms = arms.into_iter().filter_map(|a| self.configure(a, m.id)).collect();
                 ast::ExprKind::Match(m, arms)
             }
             ast::ExprKind::Struct(path, fields, base) => {
                 let fields = fields.into_iter()
                     .filter_map(|field| {
-                        self.configure(field)
+                        self.configure(field, field.expr.id)
                     })
                     .collect();
                 ast::ExprKind::Struct(path, fields, base)
@@ -306,15 +322,15 @@ impl<'a> StripUnconfigured<'a> {
             self.sess.span_diagnostic.span_err(attr.span, msg);
         }
 
-        self.process_cfg_attrs(expr)
+        self.process_cfg_attrs(expr, expr.id)
     }
 
     pub fn configure_stmt(&mut self, stmt: ast::Stmt) -> Option<ast::Stmt> {
-        self.configure(stmt)
+        self.configure(stmt, stmt.id)
     }
 
     pub fn configure_struct_expr_field(&mut self, field: ast::Field) -> Option<ast::Field> {
-        self.configure(field)
+        self.configure(field, field.expr.id)
     }
 
     pub fn configure_pat(&mut self, pattern: P<ast::Pat>) -> P<ast::Pat> {
@@ -322,7 +338,7 @@ impl<'a> StripUnconfigured<'a> {
             if let ast::PatKind::Struct(path, fields, etc) = pattern.node {
                 let fields = fields.into_iter()
                     .filter_map(|field| {
-                        self.configure(field)
+                        self.configure(field, field.pat.id)
                     })
                     .collect();
                 pattern.node = ast::PatKind::Struct(path, fields, etc);

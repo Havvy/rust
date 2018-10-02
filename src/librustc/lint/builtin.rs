@@ -338,6 +338,12 @@ declare_lint! {
      cannot be referred to by absolute paths"
 }
 
+declare_lint! {
+    pub UNUSED_ATTRIBUTES,
+    Warn,
+    "detects attributes that were not used by the compiler"
+}
+
 /// Some lints that are buffered from `libsyntax`. See `syntax::early_buffered_lints`.
 pub mod parser {
     declare_lint! {

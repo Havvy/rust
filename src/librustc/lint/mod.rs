@@ -39,6 +39,7 @@ use hir::intravisit;
 use hir;
 use lint::builtin::BuiltinLintDiagnostics;
 use lint::builtin::parser::QUESTION_MARK_MACRO_SEP;
+use lint::builtin::UNUSED_ATTRIBUTES;
 use session::{Session, DiagnosticMessageId};
 use std::{hash, ptr};
 use syntax::ast;
@@ -92,6 +93,8 @@ impl Lint {
     pub fn from_parser_lint_id(lint_id: BufferedEarlyLintId) -> &'static Self {
         match lint_id {
             BufferedEarlyLintId::QuestionMarkMacroSep => QUESTION_MARK_MACRO_SEP,
+
+            BufferedEarlyLintId::UnusedAttributes => UNUSED_ATTRIBUTES,
         }
     }
 

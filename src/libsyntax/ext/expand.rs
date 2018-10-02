@@ -1115,7 +1115,7 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
         (attr, item)
     }
 
-    fn configure<T: HasAttrs>(&mut self, node: T) -> Option<T> {
+    fn configure<T: HasAttrs>(&mut self, node: T, id: NodeId) -> Option<T> {
         self.cfg.configure(node)
     }
 

@@ -21,6 +21,10 @@ use syntax_pos::MultiSpan;
 pub enum BufferedEarlyLintId {
     /// Usage of `?` as a macro separator is deprecated.
     QuestionMarkMacroSep,
+
+    /// Detection of attributes that are not used by the compiler.
+    /// The early pass detects `cfg_attr` that has no attributes in it.
+    UnusedAttributes,
 }
 
 /// Stores buffered lint info which can later be passed to `librustc`.
